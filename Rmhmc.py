@@ -43,6 +43,7 @@ class Target:
     def neglog(self,x):
         return self.__neglog(x)   
    
+    @jax.partial(jax.jit, static_argnums=(0,))#https://github.com/google/jax/issues/1251
     def __metric(self,x):
         H = self.hessian_at(x)
         return modifiedCholesky(H,self.u)
@@ -73,6 +74,7 @@ class Hamiltonian:
         
 
     #Hamiltonian at x_star and p_star
+    @jax.partial(jax.jit, static_argnums=(0,))#https://github.com/google/jax/issues/1251
     def __fun(self,x_star,p_star):
         L = self.__target.metric(x_star)
         p_temp = np.linalg.solve(L,p_star)
@@ -192,6 +194,42 @@ class Leapfrog:
         return x,p
 
 
+class HMC:
+    def __init__(self,nsamples,target,x_init,p_init):
+        if nsamples>0:
+            self.__nsamples = int(nsamples)
+        else:
+            raise ValueError(nsamples)
+
+        if isinstance(target,Target):
+            self.__target = target
+        else:
+            raise ValueError(target)
+
+        self.__epsilon = 0.5*self.__target.d**(-0.25)
+        self.__l = 1.5/self.__epsilon
+        self.__omega = 100
+        
+        self.__hamiltonian = Hamiltonian(self.__target,x_init,p_init)
+
+        self.__leapfrog = Leapfrog(self.__epsilon,self.__l,self.__omega,self.__target,self.__hamiltonian)
+        
+        self.__samples = onp.empty((self.__nsamples,target.d),dtype=onp.float32)
+        self.__samples[0,:] = x_init
+
+    @property
+    def nsamples(self):
+        return self.__nsamples
+
+    @property
+    def samples(self):
+        return self.__samples
+
+    def run(self):
+
+        #draw new p
+        L = self.__target.metric(self.__hamiltonian.x)
+        p_star = np.linalg.solve(L@L.T,np.random.)
 
     
 
