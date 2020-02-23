@@ -9,6 +9,10 @@ rcParams['image.interpolation'] = 'nearest'
 rcParams['image.cmap'] = 'viridis'
 rcParams['axes.grid'] = False
 
+#Disable this if you not compiling code
+# from jax.config import config
+# config.update("jax_debug_nans", True)
+
 
 class Target:
     def __init__(self,neglog,d,u):
@@ -46,7 +50,8 @@ class Target:
     @jax.partial(jax.jit, static_argnums=(0,))#https://github.com/google/jax/issues/1251
     def __metric(self,x):
         H = self.hessian_at(x)
-        return modifiedCholesky(H,self.u)
+        # return modifiedCholesky(H,self.u)
+        return softabs(H)
 
     
     def metric(self,x):
@@ -162,9 +167,9 @@ class Leapfrog:
     
     @jax.partial(jax.jit, static_argnums=(0,))#https://github.com/google/jax/issues/1251
     def __phi_H_2(self,x,p,xtilde,ptilde):
-        ptilde = ptilde - 0.5*self.__epsilon*self.__hamiltonian.jacobian_at(xtilde,ptilde)
-        L = self.__target.metric(x)
-        x = x + 0.5*self.__epsilon*np.linalg.solve(L@L.T,ptilde)
+        ptilde = ptilde - 0.5*self.__epsilon*self.__hamiltonian.jacobian_at(xtilde,p)
+        L = self.__target.metric(xtilde)
+        x = x + 0.5*self.__epsilon*np.linalg.solve(L@L.T,p)
         return x,p,xtilde,ptilde
     
     @jax.partial(jax.jit, static_argnums=(0,))#https://github.com/google/jax/issues/1251
@@ -219,12 +224,24 @@ class RMHMC:
         self.__hamiltonian = Hamiltonian(self.__target,x_init,p_init)
         self.__leapfrog = Leapfrog(self.__epsilon,self.__l,self.__omega,self.__target,self.__hamiltonian)
         
-        self.__samples = np.zeros((nsamples,self.__target.d),dtype=np.float32)
-        index_update(self.__samples,index[0,:],self.__hamiltonian.x)
+        self.__samples = onp.zeros((nsamples,self.__target.d),dtype=np.float32)
+        # index_update(self.__samples,index[0,:],self.__hamiltonian.x)
+        self.__samples[0,:] = self.__hamiltonian.x
 
     @property
     def nsamples(self):
         return self.__nsamples
+    
+    @nsamples.setter
+    def nsamples(self,value):
+        if value>0:
+            self.__nsamples = int(value)
+            self.__samples = onp.zeros((self.__nsamples,self.__target.d),dtype=np.float32)
+            # index_update(self.__samples,index[0,:],self.__hamiltonian.x)
+            self.__samples[0,:] = self.__hamiltonian.x
+        else:
+            raise ValueError(value)
+
 
     @property
     def samples(self):
@@ -250,22 +267,40 @@ class RMHMC:
             L = self.__target.metric(self.__hamiltonian.x)
             w = self.__get_randn()
             p_rand = L.T@w
-            print('w = {}, p_rand = {}'.format(w,p_rand))
+            # print('w = {}, p_rand = {}'.format(w,p_rand))
             self.__hamiltonian.p = p_rand
             x_new,p_new = self.__leapfrog.leap()
             
             eval = min(1,np.exp(self.__hamiltonian.value - self.__hamiltonian.value_at(x_new,p_new)))
             if self.__get_randu() < eval:                
+                # print('accepted! x_old = {}, x_new = {}'.format(self.__hamiltonian.x,x_new))
                 self.__hamiltonian.x = x_new
-                print('accepted!')
+                self.__hamiltonian.p = p_new
+                # print('updated! x = {}, p = {}'.format(self.__hamiltonian.x,self.__hamiltonian.p))
+                
 
-            # self.__samples[i,:] = self.__hamiltonian.x
-            index_update(self.__samples,index[i,:],self.__hamiltonian.x)
+            self.__samples[i,:] = self.__hamiltonian.x
+            # index_update(self.__samples,index[i,:],self.__hamiltonian.x)
 
 
     
 
         
+
+
+
+
+'''
+The softabs function
+'''
+@jax.jit
+def softabs(H,softabs_const=1e0):
+    spec,T = np.linalg.eigh(H)
+    abs_spec = (1./np.tanh(softabs_const * spec)) * spec
+    G = (T@np.diag(abs_spec)@T.conj().T).real
+    L = np.linalg.cholesky(G)
+    return L
+
 
 
     
@@ -302,16 +337,17 @@ def modifiedCholesky(A,u,K=0):
             Lhat = index_update(Lhat,index[j,:j-1],Lhat[j,:j-1]/D[:j-1])
             if j<d-1:
                 Lhat = index_update(Lhat,index[j+1:,j],A[j+1:,j])
-                Lhat = index_update(Lhat,index[j+1:,j],Lhat[j+1:,j] - Lhat[j+1:,:j-1]*Lhat[j,:j-1])
+                Lhat = index_update(Lhat,index[j+1:,j],Lhat[j+1:,j] - Lhat[j+1:,:j-1]@Lhat[j,:j-1].T)
         else:
             if j<d:
                 Lhat = index_update(Lhat,index[j+1:,j],A[j+1:,j])
         if j>K:
-            D = index_update(D,index[j],sabs(D[j],u[j]) )
+            s = sabs(D[j],u[j])
+            D = index_update(D,index[j],s)
         
         if j<d:
             D = index_update(D,index[j+1:],D[j+1:] - Lhat[j+1:,j]*Lhat[j+1:,j]/D[j] )
-    L = Lhat@np.diag(D)
+    L = Lhat@np.diag(np.sqrt(D))
     return L
 
 
@@ -324,3 +360,17 @@ def funnel_neglog(x):
     return nLP
 
 
+
+if __name__=='__main__':
+    u = 1e-5*np.array([1.,1.])
+    target = Target(funnel_neglog,2,u)
+    x_init = np.array([0.8,-0.9])
+    p_init = np.array([0.,1.])
+    epsilon = 0.001#0.5*target.d**(-0.25)
+    l = 1.5/epsilon
+    omega = 100
+    ham = Hamiltonian(target,x_init,p_init)
+    lFrog = Leapfrog(epsilon,l,omega,target,ham)
+    hmc = RMHMC(100,target,x_init,p_init)
+
+    hmc.run()
