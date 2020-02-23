@@ -121,15 +121,6 @@ class Hamiltonian:
     
 class Leapfrog:
     def __init__(self,epsilon,l,omega,target,hamiltonian):
-        if isinstance(target,Target):
-            self.__target = target
-        else:
-            raise ValueError(target)
-
-        if isinstance(hamiltonian,Hamiltonian):
-            self.__hamiltonian = hamiltonian
-        else:
-            raise ValueError(hamiltonian)
 
         if epsilon>0:
             self.__epsilon = epsilon
@@ -145,11 +136,22 @@ class Leapfrog:
             self.__omega = int(omega)
         else:
             raise ValueError(omega)
+        
+        if isinstance(target,Target):
+            self.__target = target
+        else:
+            raise ValueError(target)
+
+        if isinstance(hamiltonian,Hamiltonian):
+            self.__hamiltonian = hamiltonian
+        else:
+            raise ValueError(hamiltonian)
 
         self.__cos = np.cos(2*self.__omega*self.__epsilon)
         self.__sin = np.sin(2*self.__omega*self.__epsilon)
 
-    
+
+
     @jax.partial(jax.jit, static_argnums=(0,))#https://github.com/google/jax/issues/1251
     def __phi_H_1(self,x,p,xtilde,ptilde):
         p = p - 0.5*self.__epsilon*self.__hamiltonian.jacobian_at(x,ptilde)
@@ -194,7 +196,7 @@ class Leapfrog:
         return x,p
 
 
-class HMC:
+class RMHMC:
     def __init__(self,nsamples,target,x_init,p_init):
         if nsamples>0:
             self.__nsamples = int(nsamples)
@@ -206,16 +208,19 @@ class HMC:
         else:
             raise ValueError(target)
 
+        self.__r_key = jax.random.PRNGKey(0)
+        self.__d = self.__target.d
+
+        #This values are set based on the suggested value mentioned in the paper
         self.__epsilon = 0.5*self.__target.d**(-0.25)
         self.__l = 1.5/self.__epsilon
         self.__omega = 100
         
         self.__hamiltonian = Hamiltonian(self.__target,x_init,p_init)
-
         self.__leapfrog = Leapfrog(self.__epsilon,self.__l,self.__omega,self.__target,self.__hamiltonian)
         
-        self.__samples = onp.empty((self.__nsamples,target.d),dtype=onp.float32)
-        self.__samples[0,:] = x_init
+        self.__samples = np.zeros((nsamples,self.__target.d),dtype=np.float32)
+        index_update(self.__samples,index[0,:],self.__hamiltonian.x)
 
     @property
     def nsamples(self):
@@ -225,11 +230,43 @@ class HMC:
     def samples(self):
         return self.__samples
 
-    def run(self):
+    def __get_randn(self):
+        self.__r_key,subkey = jax.random.split(self.__r_key)
+        return jax.random.normal(subkey,shape=(self.__d,))
 
-        #draw new p
-        L = self.__target.metric(self.__hamiltonian.x)
-        p_star = np.linalg.solve(L@L.T,np.random.)
+    def __get_randu(self):
+        self.__r_key,subkey = jax.random.split(self.__r_key)
+        return jax.random.uniform(subkey,shape=(1,))
+
+    
+    def run(self):
+        # self.__samples = np.empty((nsamples,self.__target.d),dtype=np.float32)
+        # index_update(self.__samples,index[0,:],self.__hamiltonian.x)
+        
+
+        #Initial hamiltonian
+        for i in range(1,self.__nsamples):
+            #draw new p
+            L = self.__target.metric(self.__hamiltonian.x)
+            w = self.__get_randn()
+            p_rand = L.T@w
+            print('w = {}, p_rand = {}'.format(w,p_rand))
+            self.__hamiltonian.p = p_rand
+            x_new,p_new = self.__leapfrog.leap()
+            
+            eval = min(1,np.exp(self.__hamiltonian.value - self.__hamiltonian.value_at(x_new,p_new)))
+            if self.__get_randu() < eval:                
+                self.__hamiltonian.x = x_new
+                print('accepted!')
+
+            # self.__samples[i,:] = self.__hamiltonian.x
+            index_update(self.__samples,index[i,:],self.__hamiltonian.x)
+
+
+    
+
+        
+
 
     
 
