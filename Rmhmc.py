@@ -18,26 +18,28 @@ import scipy.fftpack as FFT
 
 
 class Target:
-    def __init__(self,neglog,d,u):
+    def __init__(self,neglog,d,metric_fun):
         self.__neglog = neglog
         self.__hessian_fun = jax.jit(jax.jacfwd(jax.jacrev(self.__neglog)))
+        self.__metric_fun = metric_fun
         self.__d = d
         self.__softabs_const = 1e0
-        if u.ndim == 1 and u.shape[0]==self.__d:
-            self.__u = u
-        else:
-            raise ValueError(u)
+        # if u.ndim == 1 and u.shape[0]==self.__d:
+        #     self.__u = u
+        # else:
+        #     raise ValueError(u)
         
-    @property
-    def u(self):
-        return self.__u
+    # @property
+    # def u(self):
+    #     return self.__u
 
-    @u.setter
-    def u(self,u):
-        if u.ndim == 1 and u.shape[0]==self.__d:
-            self.__u = u
-        else:
-            raise ValueError(u)
+    # @u.setter
+    # def u(self,u):
+    #     if u.ndim == 1 and u.shape[0]==self.__d:
+    #         self.__u = u
+    #     else:
+    #         raise ValueError(u)
+    
 
     @property
     def softabs_const(self):
@@ -65,8 +67,9 @@ class Target:
     @jax.partial(jax.jit, static_argnums=(0,))#https://github.com/google/jax/issues/1251
     def __metric(self,x):
         H = self.hessian_at(x)
+        return self.__metric_fun(H,self.__softabs_const)
         # return modifiedCholesky(H,self.u)
-        return softabs(H,self.__softabs_const)
+        # return softabs(H,self.__softabs_const)
         # return metric_expm(H,self.__softabs_const)
 
     
@@ -74,7 +77,14 @@ class Target:
         # return np.eye(self.__d)
         return self.__metric(x)
     
-        
+    @property
+    def metric_fun(self):
+        return self.__metric_fun
+
+    @metric_fun.setter
+    def metric_fun(self,value):
+        self.__metric_fun = value
+
 class Hamiltonian:
     def __init__(self,target,x,p):
         if isinstance(target,Target):
@@ -143,7 +153,7 @@ class Hamiltonian:
     
     
 class Leapfrog:
-    def __init__(self,epsilon,l,omega,target,hamiltonian):
+    def __init__(self,epsilon,l,omega,target,hamiltonian,track=False):
 
         if epsilon>0:
             self.__epsilon = epsilon
@@ -170,9 +180,53 @@ class Leapfrog:
         else:
             raise ValueError(hamiltonian)
 
+        self.__track = track
+        self.__path = onp.empty((self.__l,self.__target.d))
+
         self.__cos = np.cos(2*self.__omega*self.__epsilon)
         self.__sin = np.sin(2*self.__omega*self.__epsilon)
 
+    @property
+    def track(self):
+        return self.__track
+
+    @track.setter
+    def l(self,value):
+        self.__track=value
+
+    
+    @property
+    def l(self):
+        return self.__l
+
+    @l.setter
+    def l(self,value):
+        if value>0:
+            self.__l = value
+        else:
+            raise ValueError(value)
+
+    @property
+    def epsilon(self):
+        return self.__epsilon
+
+    @epsilon.setter
+    def epsilon(self,value):
+        if value>0:
+            self.__epsilon = int(value)
+        else:
+            raise ValueError(value)
+
+    @property
+    def omega(self):
+        return self.__omega
+
+    @omega.setter
+    def omega(self,value):
+        if value>0:
+            self.__omega = value
+        else:
+            raise ValueError(value)
 
 
     @jax.partial(jax.jit, static_argnums=(0,))#https://github.com/google/jax/issues/1251
@@ -180,7 +234,7 @@ class Leapfrog:
         p = p - 0.5*self.__epsilon*self.__hamiltonian.jacobian_at(x,ptilde)
         L = self.__target.metric(x)
         # xtilde = xtilde + 0.5*self.__epsilon*np.linalg.solve(L@L.T,ptilde)
-        xtilde = xtilde + 0.5*self.__epsilon*sla.solve_triangular(L,sla.solve_triangular(L.T,ptilde,lower=True),lower=False)
+        xtilde = xtilde + 0.5*self.__epsilon*sla.solve_triangular(L.T,sla.solve_triangular(L,ptilde,lower=False),lower=True)
         return x,p,xtilde,ptilde
     
     
@@ -189,7 +243,7 @@ class Leapfrog:
         ptilde = ptilde - 0.5*self.__epsilon*self.__hamiltonian.jacobian_at(xtilde,p)
         L = self.__target.metric(xtilde)
         # x = x + 0.5*self.__epsilon*np.linalg.solve(L@L.T,p)
-        x = x + 0.5*self.__epsilon*sla.solve_triangular(L,sla.solve_triangular(L.T,p,lower=True),lower=False)
+        x = x + 0.5*self.__epsilon*sla.solve_triangular(L.T,sla.solve_triangular(L,p,lower=False),lower=True)
         return x,p,xtilde,ptilde
     
     @jax.partial(jax.jit, static_argnums=(0,))#https://github.com/google/jax/issues/1251
@@ -207,7 +261,7 @@ class Leapfrog:
         xtilde = x.copy()
         ptilde = p.copy()
 
-        for _ in range(self.__l):
+        for i in range(self.__l):
             x,p,xtilde,ptilde = self.__phi_H_1(x,p,xtilde,ptilde)
 
             x,p,xtilde,ptilde = self.__phi_H_2(x,p,xtilde,ptilde)
@@ -218,12 +272,19 @@ class Leapfrog:
 
             x,p,xtilde,ptilde = self.__phi_H_1(x,p,xtilde,ptilde)
 
+            if self.__track:
+                self.__path[i,:] = x
+
         if self.__check_nan(x,p):
             print('There is nan in the result! revert back to the original position')
             x = self.__hamiltonian.x.copy()
             p = self.__hamiltonian.p.copy()
-
-        return x,p
+        
+        if self.__track:
+            return x,p,self.__path
+        else:
+            return x,p
+        
 
     def __check_nan(self,x,p):
         ret=False
@@ -259,6 +320,44 @@ class RMHMC:
         # index_update(self.__samples,index[0,:],self.__hamiltonian.x)
         self.__samples[0,:] = self.__hamiltonian.x
 
+
+    @property
+    def leapfrog(self):
+        return self.__leapfrog
+
+    @property
+    def l(self):
+        return self.__l
+
+    @l.setter
+    def l(self,value):
+        if value>0:
+            self.__l = value
+        else:
+            raise ValueError(value)
+
+    @property
+    def epsilon(self):
+        return self.__epsilon
+
+    @epsilon.setter
+    def epsilon(self,value):
+        if value>0:
+            self.__epsilon = int(value)
+        else:
+            raise ValueError(value)
+
+    @property
+    def omega(self):
+        return self.__omega
+
+    @omega.setter
+    def omega(self,value):
+        if value>0:
+            self.__omega = value
+        else:
+            raise ValueError(value)
+    
     @property
     def nsamples(self):
         return self.__nsamples
@@ -319,8 +418,8 @@ class RMHMC:
         
 
 
-
-
+#These are some metrics
+#generally it takes H, and constant as an argument
 '''
 The softabs function
 '''
@@ -338,7 +437,7 @@ The softabs function
 '''
 @jax.jit
 def metric_expm(H,softabs_const=1e0):
-    temp = sla.expm(softabs_const*H)
+    temp = sla.expm(softabs_const*H)+sla.expm(-softabs_const*H)
     return sla.cholesky(temp)
 
 
