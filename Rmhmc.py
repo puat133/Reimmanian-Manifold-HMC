@@ -2,12 +2,15 @@ import numpy as onp
 from jax.ops import index,index_update,index_add
 import jax
 import jax.numpy as np
+import jax.scipy.linalg as sla
 import matplotlib as mpl
 from matplotlib import pyplot as plt
 from matplotlib import rcParams
 rcParams['image.interpolation'] = 'nearest'
 rcParams['image.cmap'] = 'viridis'
 rcParams['axes.grid'] = False
+
+import scipy.fftpack as FFT
 
 #Disable this if you not compiling code
 # from jax.config import config
@@ -19,6 +22,7 @@ class Target:
         self.__neglog = neglog
         self.__hessian_fun = jax.jit(jax.jacfwd(jax.jacrev(self.__neglog)))
         self.__d = d
+        self.__softabs_const = 1e0
         if u.ndim == 1 and u.shape[0]==self.__d:
             self.__u = u
         else:
@@ -34,6 +38,17 @@ class Target:
             self.__u = u
         else:
             raise ValueError(u)
+
+    @property
+    def softabs_const(self):
+        return self.__softabs_const
+
+    @softabs_const.setter
+    def softabs_const(self,softabs_const):
+        if softabs_const>0:
+            self.__softabs_const = softabs_const
+        else:
+            raise ValueError(softabs_const)
     
     @property
     def d(self):
@@ -51,10 +66,12 @@ class Target:
     def __metric(self,x):
         H = self.hessian_at(x)
         # return modifiedCholesky(H,self.u)
-        return softabs(H)
+        return softabs(H,self.__softabs_const)
+        # return metric_expm(H,self.__softabs_const)
 
     
     def metric(self,x):
+        # return np.eye(self.__d)
         return self.__metric(x)
     
         
@@ -82,7 +99,8 @@ class Hamiltonian:
     @jax.partial(jax.jit, static_argnums=(0,))#https://github.com/google/jax/issues/1251
     def __fun(self,x_star,p_star):
         L = self.__target.metric(x_star)
-        p_temp = np.linalg.solve(L,p_star)
+        # p_temp = np.linalg.solve(L,p_star)
+        p_temp = sla.solve_triangular(L,p_star,lower=False)
         return self.__target.neglog(x_star) + 0.5*np.sum(p_temp*p_temp) + np.linalg.slogdet(L)[1]
 
 
@@ -161,7 +179,8 @@ class Leapfrog:
     def __phi_H_1(self,x,p,xtilde,ptilde):
         p = p - 0.5*self.__epsilon*self.__hamiltonian.jacobian_at(x,ptilde)
         L = self.__target.metric(x)
-        xtilde = xtilde + 0.5*self.__epsilon*np.linalg.solve(L@L.T,ptilde)
+        # xtilde = xtilde + 0.5*self.__epsilon*np.linalg.solve(L@L.T,ptilde)
+        xtilde = xtilde + 0.5*self.__epsilon*sla.solve_triangular(L,sla.solve_triangular(L.T,ptilde,lower=True),lower=False)
         return x,p,xtilde,ptilde
     
     
@@ -169,7 +188,8 @@ class Leapfrog:
     def __phi_H_2(self,x,p,xtilde,ptilde):
         ptilde = ptilde - 0.5*self.__epsilon*self.__hamiltonian.jacobian_at(xtilde,p)
         L = self.__target.metric(xtilde)
-        x = x + 0.5*self.__epsilon*np.linalg.solve(L@L.T,p)
+        # x = x + 0.5*self.__epsilon*np.linalg.solve(L@L.T,p)
+        x = x + 0.5*self.__epsilon*sla.solve_triangular(L,sla.solve_triangular(L.T,p,lower=True),lower=False)
         return x,p,xtilde,ptilde
     
     @jax.partial(jax.jit, static_argnums=(0,))#https://github.com/google/jax/issues/1251
@@ -198,9 +218,20 @@ class Leapfrog:
 
             x,p,xtilde,ptilde = self.__phi_H_1(x,p,xtilde,ptilde)
 
+        if self.__check_nan(x,p):
+            print('There is nan in the result! revert back to the original position')
+            x = self.__hamiltonian.x.copy()
+            p = self.__hamiltonian.p.copy()
+
         return x,p
 
-
+    def __check_nan(self,x,p):
+        ret=False
+        if np.any(np.isnan(x)) or np.any(np.isnan(p)):
+            ret = True
+        return ret
+            
+        
 class RMHMC:
     def __init__(self,nsamples,target,x_init,p_init):
         if nsamples>0:
@@ -298,8 +329,17 @@ def softabs(H,softabs_const=1e0):
     spec,T = np.linalg.eigh(H)
     abs_spec = (1./np.tanh(softabs_const * spec)) * spec
     G = (T@np.diag(abs_spec)@T.conj().T).real
-    L = np.linalg.cholesky(G)
+    L = sla.cholesky(G)
     return L
+
+
+'''
+The softabs function
+'''
+@jax.jit
+def metric_expm(H,softabs_const=1e0):
+    temp = sla.expm(softabs_const*H)
+    return sla.cholesky(temp)
 
 
 
@@ -359,6 +399,10 @@ def funnel_neglog(x):
     nLP = (x[0]**2/(2*np.exp(x[1])) + x[1]/2 + x[1]**2/18)
     return nLP
 
+@jax.jit
+def fourth_order_neglog(x):
+    nLP = np.linalg.norm(x)
+    return nLP
 
 
 if __name__=='__main__':
@@ -374,3 +418,14 @@ if __name__=='__main__':
     hmc = RMHMC(100,target,x_init,p_init)
 
     hmc.run()
+
+
+
+def autocorrelation(x):
+    xp = FFT.ifftshift((x - onp.average(x))/onp.std(x))
+    n, = xp.shape
+    xp = onp.r_[xp[:n//2], np.zeros_like(xp), xp[n//2:]]
+    f = FFT.fft(xp)
+    p = onp.absolute(f)**2
+    pi = FFT.ifft(p)
+    return onp.real(onp.pi)[:n//2]/(onp.arange(n//2)[::-1]+n//2)
