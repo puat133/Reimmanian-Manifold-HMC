@@ -9,7 +9,7 @@ from matplotlib import rcParams
 rcParams['image.interpolation'] = 'nearest'
 rcParams['image.cmap'] = 'viridis'
 rcParams['axes.grid'] = False
-
+from tqdm import tqdm
 import scipy.fftpack as FFT
 
 #Disable this if you not compiling code
@@ -191,7 +191,7 @@ class Leapfrog:
         return self.__track
 
     @track.setter
-    def l(self,value):
+    def track(self,value):
         self.__track=value
 
     
@@ -203,6 +203,7 @@ class Leapfrog:
     def l(self,value):
         if value>0:
             self.__l = value
+            self.__path = onp.empty((self.__l,self.__target.d))
         else:
             raise ValueError(value)
 
@@ -309,16 +310,18 @@ class RMHMC:
         self.__d = self.__target.d
 
         #This values are set based on the suggested value mentioned in the paper
-        self.__epsilon = 0.5*self.__target.d**(-0.25)
-        self.__l = 1.5/self.__epsilon
-        self.__omega = 100
-        
+        epsilon = 0.5*self.__target.d**(-0.25)
+        l = int(1.5/epsilon)
+        omega = 100
         self.__hamiltonian = Hamiltonian(self.__target,x_init,p_init)
-        self.__leapfrog = Leapfrog(self.__epsilon,self.__l,self.__omega,self.__target,self.__hamiltonian)
+        self.__leapfrog = Leapfrog(epsilon,l,omega,self.__target,self.__hamiltonian)
         
-        self.__samples = onp.zeros((nsamples,self.__target.d),dtype=np.float32)
+        self.__samples = onp.zeros((self.__nsamples,self.__target.d),dtype=np.float32)
+        self.__path = onp.empty((self.__leapfrog.l*self.__nsamples,self.__target.d))
+
         # index_update(self.__samples,index[0,:],self.__hamiltonian.x)
         self.__samples[0,:] = self.__hamiltonian.x
+        
 
 
     @property
@@ -327,34 +330,47 @@ class RMHMC:
 
     @property
     def l(self):
-        return self.__l
+        return self.__leapfrog.l 
 
     @l.setter
     def l(self,value):
         if value>0:
-            self.__l = value
+            self.__leapfrog.l = value
+            self.__path = onp.empty((self.__leapfrog.l *self.__nsamples,self.__target.d))
         else:
             raise ValueError(value)
 
     @property
+    def path(self):
+        return self.__path
+    
+    @property
+    def track(self):
+        return self.__leapfrog.track
+
+    @track.setter
+    def track(self,value):
+        self.__leapfrog.track=value
+
+    @property
     def epsilon(self):
-        return self.__epsilon
+        return self.__leapfrog.epsilon
 
     @epsilon.setter
     def epsilon(self,value):
         if value>0:
-            self.__epsilon = int(value)
+            self.__leapfrog.epsilon = value
         else:
             raise ValueError(value)
 
     @property
     def omega(self):
-        return self.__omega
+        return self.__leapfrog.omega
 
     @omega.setter
     def omega(self,value):
         if value>0:
-            self.__omega = value
+            self.__leapfrog.omega = value
         else:
             raise ValueError(value)
     
@@ -367,6 +383,7 @@ class RMHMC:
         if value>0:
             self.__nsamples = int(value)
             self.__samples = onp.zeros((self.__nsamples,self.__target.d),dtype=np.float32)
+            self.__path = onp.empty((self.__leapfrog.l*self.__nsamples,self.__target.d))
             # index_update(self.__samples,index[0,:],self.__hamiltonian.x)
             self.__samples[0,:] = self.__hamiltonian.x
         else:
@@ -392,22 +409,29 @@ class RMHMC:
         
 
         #Initial hamiltonian
-        for i in range(1,self.__nsamples):
+        for i in tqdm(range(1,self.__nsamples)):
             #draw new p
             L = self.__target.metric(self.__hamiltonian.x)
             w = self.__get_randn()
             p_rand = L.T@w
             # print('w = {}, p_rand = {}'.format(w,p_rand))
             self.__hamiltonian.p = p_rand
-            x_new,p_new = self.__leapfrog.leap()
+            if not self.track:
+                x_new,p_new = self.__leapfrog.leap()
+            else:
+                x_new,p_new,path = self.__leapfrog.leap()
             
             eval = min(1,np.exp(self.__hamiltonian.value - self.__hamiltonian.value_at(x_new,p_new)))
             if self.__get_randu() < eval:                
                 # print('accepted! x_old = {}, x_new = {}'.format(self.__hamiltonian.x,x_new))
                 self.__hamiltonian.x = x_new
                 self.__hamiltonian.p = p_new
+                if self.track:
+                    self.__path[i*self.__leapfrog.l:(i+1)*self.__leapfrog.l,:] = path
                 # print('updated! x = {}, p = {}'.format(self.__hamiltonian.x,self.__hamiltonian.p))
-                
+            else:
+                if self.track:
+                    self.__path[i*self.__leapfrog.l:(i+1)*self.__leapfrog.l,:] = x_new
 
             self.__samples[i,:] = self.__hamiltonian.x
             # index_update(self.__samples,index[i,:],self.__hamiltonian.x)
@@ -505,26 +529,23 @@ def fourth_order_neglog(x):
 
 
 if __name__=='__main__':
-    u = 1e-5*np.array([1.,1.])
-    target = Target(funnel_neglog,2,u)
-    x_init = np.array([0.8,-0.9])
-    p_init = np.array([0.,1.])
-    epsilon = 0.001#0.5*target.d**(-0.25)
-    l = 1.5/epsilon
-    omega = 100
-    ham = Hamiltonian(target,x_init,p_init)
-    lFrog = Leapfrog(epsilon,l,omega,target,ham)
+    target = Target(funnel_neglog,2,metric_fun=softabs)
+    x_init = np.array([0.,0.])
+    p_init = np.array([0.,0.])
     hmc = RMHMC(100,target,x_init,p_init)
-
+    # hmc.track=True
+    target.metric_fun = softabs
+    target.softabs_const = 1e0
+    # hmc.l=3
     hmc.run()
+    print('is there any nan here? {}'.format(onp.any(onp.isnan(hmc.samples))))
 
 
-
-def autocorrelation(x):
-    xp = FFT.ifftshift((x - onp.average(x))/onp.std(x))
-    n, = xp.shape
-    xp = onp.r_[xp[:n//2], np.zeros_like(xp), xp[n//2:]]
-    f = FFT.fft(xp)
-    p = onp.absolute(f)**2
-    pi = FFT.ifft(p)
-    return onp.real(onp.pi)[:n//2]/(onp.arange(n//2)[::-1]+n//2)
+# def autocorrelation(x):
+#     xp = FFT.ifftshift((x - onp.average(x))/onp.std(x))
+#     n, = xp.shape
+#     xp = onp.r_[xp[:n//2], np.zeros_like(xp), xp[n//2:]]
+#     f = FFT.fft(xp)
+#     p = onp.absolute(f)**2
+#     pi = FFT.ifft(p)
+#     return onp.real(onp.pi)[:n//2]/(onp.arange(n//2)[::-1]+n//2)
