@@ -214,7 +214,7 @@ class Leapfrog:
     @epsilon.setter
     def epsilon(self,value):
         if value>0:
-            self.__epsilon = int(value)
+            self.__epsilon = value
         else:
             raise ValueError(value)
 
@@ -295,7 +295,7 @@ class Leapfrog:
             
         
 class RMHMC:
-    def __init__(self,nsamples,target,x_init,p_init):
+    def __init__(self,nsamples,target,x_init,p_init,seed=0):
         if nsamples>0:
             self.__nsamples = int(nsamples)
         else:
@@ -306,7 +306,12 @@ class RMHMC:
         else:
             raise ValueError(target)
 
-        self.__r_key = jax.random.PRNGKey(0)
+        if seed>0:
+            self.__seed = int(seed)
+        else:
+            raise ValueError(seed)
+
+        self.__r_key = jax.random.PRNGKey(self.__seed)
         self.__d = self.__target.d
 
         #This values are set based on the suggested value mentioned in the paper
@@ -451,7 +456,7 @@ The softabs function
 def softabs(H,softabs_const=1e0):
     spec,T = np.linalg.eigh(H)
     abs_spec = (1./np.tanh(softabs_const * spec)) * spec
-    G = (T@np.diag(abs_spec)@T.conj().T).real
+    G = ((T*abs_spec)@T.T)
     L = sla.cholesky(G)
     return L
 
@@ -527,18 +532,28 @@ def fourth_order_neglog(x):
     nLP = np.linalg.norm(x)
     return nLP
 
+@jax.jit
+def two_dimensionalGaussian(x):
+    return (x[0]*x[0]+x[1]*x[1])
+
 
 if __name__=='__main__':
+    
     target = Target(funnel_neglog,2,metric_fun=softabs)
     x_init = np.array([0.,0.])
     p_init = np.array([0.,0.])
-    hmc = RMHMC(100,target,x_init,p_init)
-    # hmc.track=True
+    hmc = RMHMC(100,target,x_init,p_init,seed=onp.random.randint(1,1000))
+    hmc.track=True
     target.metric_fun = softabs
     target.softabs_const = 1e0
-    # hmc.l=3
+    hmc.epsilon *= 0.05
+    hmc.l *=100
     hmc.run()
     print('is there any nan here? {}'.format(onp.any(onp.isnan(hmc.samples))))
+    plt.figure(figsize=(25,5))
+    plt.plot(hmc.path[:,0],hmc.path[:,1],alpha=0.3,linewidth=0.3)
+    plt.scatter(hmc.samples[:,0],hmc.samples[:,1],alpha=0.5)
+    plt.show()
 
 
 # def autocorrelation(x):
