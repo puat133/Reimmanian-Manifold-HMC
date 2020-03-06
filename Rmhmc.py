@@ -546,13 +546,20 @@ if __name__=='__main__':
     hmc.track=True
     target.metric_fun = softabs
     target.softabs_const = 1e0
-    hmc.epsilon *= 0.05
-    hmc.l *=100
+    hmc.epsilon *= 0.1
+    hmc.l *=40
     hmc.run()
     print('is there any nan here? {}'.format(onp.any(onp.isnan(hmc.samples))))
-    plt.figure(figsize=(25,5))
-    plt.plot(hmc.path[:,0],hmc.path[:,1],alpha=0.3,linewidth=0.3)
-    plt.scatter(hmc.samples[:,0],hmc.samples[:,1],alpha=0.5)
+    plt.figure(figsize=(10,10))
+    
+    x = np.linspace(np.nanmin(hmc.path[:,0]),np.nanmax(hmc.path[:,0]),501)  
+    y = np.linspace(np.nanmin(hmc.path[:,1]),np.nanmax(hmc.path[:,1]),501)
+    X,Y = np.meshgrid(x,y)
+    Z = target.neglog((X,Y))
+    plt.imshow(Z, vmin=Z.min(), vmax=Z.max(), origin='lower',
+           extent=[x.min(), x.max(), y.min(), y.max()],cmap=plt.cm.ocean)
+    plt.plot(hmc.path[:,0],hmc.path[:,1],alpha=0.2,linewidth=0.3,color='black')
+    plt.scatter(hmc.samples[:,0],hmc.samples[:,1],alpha=0.3,color='black')
     plt.show()
 
 
