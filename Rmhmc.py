@@ -542,12 +542,12 @@ if __name__=='__main__':
     target = Target(funnel_neglog,2,metric_fun=softabs)
     x_init = np.array([0.,0.])
     p_init = np.array([0.,0.])
-    hmc = RMHMC(100,target,x_init,p_init,seed=onp.random.randint(1,1000))
+    hmc = RMHMC(1000,target,x_init,p_init,seed=onp.random.randint(1,1000))
     hmc.track=True
     target.metric_fun = softabs
     target.softabs_const = 1e0
-    hmc.epsilon *= 0.1
-    hmc.l *=40
+    hmc.epsilon *= 0.05
+    hmc.l *=20
     hmc.run()
     print('is there any nan here? {}'.format(onp.any(onp.isnan(hmc.samples))))
     plt.figure(figsize=(10,10))
@@ -555,10 +555,10 @@ if __name__=='__main__':
     x = np.linspace(np.nanmin(hmc.path[:,0]),np.nanmax(hmc.path[:,0]),501)  
     y = np.linspace(np.nanmin(hmc.path[:,1]),np.nanmax(hmc.path[:,1]),501)
     X,Y = np.meshgrid(x,y)
-    Z = target.neglog((X,Y))
+    Z = np.exp(-target.neglog((X,Y)))
     plt.imshow(Z, vmin=Z.min(), vmax=Z.max(), origin='lower',
-           extent=[x.min(), x.max(), y.min(), y.max()],cmap=plt.cm.ocean)
-    plt.plot(hmc.path[:,0],hmc.path[:,1],alpha=0.2,linewidth=0.3,color='black')
+           extent=[x.min(), x.max(), y.min(), y.max()],cmap=plt.cm.gist_earth_r)
+    plt.plot(hmc.path[:,0],hmc.path[:,1],alpha=0.2,linewidth=1,color='black')
     plt.scatter(hmc.samples[:,0],hmc.samples[:,1],alpha=0.3,color='black')
     plt.show()
 
